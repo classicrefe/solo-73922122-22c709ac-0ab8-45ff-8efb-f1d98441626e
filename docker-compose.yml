@@ -1,14 +1,39 @@
 services:
-  web:
+  web-a:
     build: .
-    container_name: cdc-release-guard
+    container_name: cdc-release-guard-a
     ports:
       - "8000:8000"
     environment:
-      - DB_PATH=/data/app.db
+      DB_PATH: /data/app.db
+      SELF_URL: http://web-a:8000
+      PEER_URLS: http://web-b:8000
+      DEMO_MODE: "1"
     volumes:
-      - app_data:/data   # SQLite 持久化：公开记录重启保留
+      - app_data:/data   # 两个实例共享同一 SQLite 文件：跨进程并发导入
     restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request;urllib.request.urlopen('http://127.0.0.1:8000/api/public').read()"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  web-b:
+    build: .
+    container_name: cdc-release-guard-b
+    ports:
+      - "8001:8000"
+    environment:
+      DB_PATH: /data/app.db
+      SELF_URL: http://web-b:8000
+      PEER_URLS: http://web-a:8000
+      DEMO_MODE: "1"
+    volumes:
+      - app_data:/data
+    restart: unless-stopped
+    depends_on:
+      web-a:
+        condition: service_healthy
 
 volumes:
   app_data:

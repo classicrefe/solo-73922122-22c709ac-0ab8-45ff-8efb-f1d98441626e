@@ -1,0 +1,177 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>并发导入演示</title>
+<style>
+  body{font-family:system-ui,"PingFang SC","Microsoft YaHei",sans-serif;margin:0;background:#f4f6f8;color:#222}
+  header{background:#5a3d8a;color:#fff;padding:14px 24px;display:flex;align-items:baseline;gap:16px;flex-wrap:wrap}
+  header h1{margin:0;font-size:20px}
+  header a{color:#e4d8ff;font-size:13px}
+  main{max-width:1100px;margin:20px auto;padding:0 16px}
+  section{background:#fff;border-radius:8px;padding:16px 20px;margin-bottom:16px;box-shadow:0 1px 3px rgba(0,0,0,.08)}
+  h2{font-size:16px;margin:0 0 12px}
+  .filepick{display:flex;gap:24px;flex-wrap:wrap;margin:8px 0}
+  .filepick div{flex:1;min-width:260px;border:1px dashed #c4ccd6;border-radius:6px;padding:10px}
+  .filepick b{font-size:14px}
+  .filepick p{font-size:12px;color:#667;margin:4px 0 8px}
+  button{background:#5a3d8a;color:#fff;border:0;border-radius:6px;padding:8px 16px;font-size:14px;cursor:pointer;margin-right:8px}
+  button.secondary{background:#5a6b7b}
+  button:disabled{opacity:.5;cursor:default}
+  table{border-collapse:collapse;margin-top:8px;width:100%}
+  th,td{border:1px solid #dde3ea;padding:6px 10px;font-size:13px;text-align:left;vertical-align:top}
+  th{background:#eef2f6}
+  .msg{margin-top:12px;padding:10px 12px;border-radius:6px;font-size:14px;white-space:pre-wrap;display:none}
+  .msg.ok{display:block;background:#e6f6e8;border:1px solid #9ed3a7}
+  .msg.err{display:block;background:#fdecea;border:1px solid #f2b8b0}
+  .msg.info{display:block;background:#eef2f6;border:1px solid #c4ccd6}
+  .badge{display:inline-block;padding:1px 8px;border-radius:10px;font-size:12px;font-weight:600}
+  .badge.win{background:#d9f2df;color:#1d6b32}
+  .badge.lose{background:#fde3df;color:#9b2c1c}
+  .badge.other{background:#e8e8ee;color:#444}
+  code{background:#f3f4f7;padding:1px 5px;border-radius:4px;font-size:12px}
+  .hint{font-size:13px;color:#667}
+</style>
+</head>
+<body>
+<header>
+  <h1>并发导入演示：两份 CSV 同时导入</h1>
+  <a href="/" target="_blank">内部审查台</a>
+  <a href="/public" target="_blank">公开页</a>
+</header>
+<main>
+  <section>
+    <h2>1. 选择两份调查 CSV</h2>
+    <p class="hint">点「发起并发导入」后，两份文件会<strong>同时</strong>发往两个服务实例（或同一实例）。
+      预期：恰好一份返回 <code>201 已导入</code>，另一份返回 <code>409 已导入</code>；库中只保留获胜的一份，格数不超过 16。</p>
+    <div class="filepick">
+      <div>
+        <b>文件 A</b>（发往 <span id="tA">-</span>）
+        <p>默认载入示例 A：4 格，分区「城东 / 城西」</p>
+        <input type="file" id="fileA" accept=".csv">
+      </div>
+      <div>
+        <b>文件 B</b>（发往 <span id="tB">-</span>）
+        <p>默认载入示例 B：4 格，分区「城南 / 城北」</p>
+        <input type="file" id="fileB" accept=".csv">
+      </div>
+    </div>
+    <button id="goBtn" onclick="runPair()">发起并发导入</button>
+    <button class="secondary" onclick="loadSamples()">重新载入示例文件</button>
+    <button class="secondary" onclick="resetDemo()">清空数据（仅演示模式）</button>
+    <div id="msg" class="msg"></div>
+  </section>
+
+  <section>
+    <h2>2. 双方响应</h2>
+    <div id="results" class="hint">尚未发起。</div>
+  </section>
+
+  <section>
+    <h2>3. 两个实例看到的最终状态（应为同一份获胜调查）</h2>
+    <div id="states" class="hint">尚未发起。</div>
+  </section>
+
+  <section>
+    <h2>4. 数据库中的获胜调查</h2>
+    <div id="db" class="hint">尚未发起。</div>
+  </section>
+</main>
+<script>
+let cfg = null;
+function esc(s){return String(s).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));}
+async function api(path, opts){
+  const r = await fetch(path, opts);
+  const body = await r.json().catch(() => ({}));
+  if(!r.ok) throw {status: r.status, body};
+  return body;
+}
+function show(el, cls, text){ el.className = 'msg ' + cls; el.textContent = text; }
+
+async function init(){
+  cfg = await api('/api/demo/config');
+  const targets = cfg.targets;
+  document.getElementById('tA').textContent = targets[0];
+  document.getElementById('tB').textContent = targets[1] || (targets[0] + '（同一实例）');
+  if(!cfg.demo_mode){
+    document.querySelectorAll('button').forEach(b => {
+      if(b.textContent.includes('清空数据')) b.disabled = true;
+    });
+  }
+  await loadSamples();
+}
+async function fetchAsFile(url, name){
+  const blob = await (await fetch(url)).blob();
+  return new File([blob], name, {type: 'text/csv'});
+}
+async function loadSamples(){
+  const [a, b] = await Promise.all([
+    fetchAsFile('/sample_survey.csv', 'sample_survey.csv'),
+    fetchAsFile('/sample_survey_b.csv', 'sample_survey_b.csv'),
+  ]);
+  const dtA = new DataTransfer(); dtA.items.add(a);
+  const dtB = new DataTransfer(); dtB.items.add(b);
+  document.getElementById('fileA').files = dtA.files;
+  document.getElementById('fileB').files = dtB.files;
+}
+async function resetDemo(){
+  const el = document.getElementById('msg');
+  try{
+    await api('/api/demo/reset', {method: 'POST'});
+    show(el, 'info', '已清空调查与发布记录，可重新演示。');
+    document.getElementById('results').innerHTML = '<span class="hint">尚未发起。</span>';
+    document.getElementById('states').innerHTML = '<span class="hint">尚未发起。</span>';
+    document.getElementById('db').innerHTML = '<span class="hint">尚未发起。</span>';
+  }catch(e){
+    show(el, 'err', '清空失败：' + ((e.body && e.body.detail) || e.status || e));
+  }
+}
+function badge(status){
+  if(status === 201) return '<span class="badge win">201 获胜</span>';
+  if(status === 409) return '<span class="badge lose">409 冲突</span>';
+  return '<span class="badge other">' + esc(status ?? '连接失败') + '</span>';
+}
+async function runPair(){
+  const el = document.getElementById('msg');
+  const a = document.getElementById('fileA').files[0];
+  const b = document.getElementById('fileB').files[0];
+  if(!a || !b){ show(el, 'err', '请选择两份 CSV 文件'); return; }
+  const btn = document.getElementById('goBtn');
+  btn.disabled = true;
+  show(el, 'info', '并发请求已发出，等待双方响应…');
+  try{
+    const fd = new FormData();
+    fd.append('file_a', a, a.name);
+    fd.append('file_b', b, b.name);
+    const r = await api('/api/demo/import-pair', {method: 'POST', body: fd});
+    const ok = r.winner_count === 1 && r.conflict_count === 1;
+    show(el, ok ? 'ok' : 'err',
+      ok ? '符合预期：恰好一份导入成功，另一份收到冲突；库中只保留获胜的一份。'
+         : `不符合预期：成功 ${r.winner_count} 份，冲突 ${r.conflict_count} 份。`);
+
+    document.getElementById('results').innerHTML =
+      '<table><tr><th>文件</th><th>目标实例</th><th>状态</th><th>响应</th></tr>'
+      + r.results.map(x => `<tr><td>${esc(x.file)}</td><td>${esc(x.target)}</td><td>${badge(x.status)}</td><td><code>${esc(JSON.stringify(x.body))}</code></td></tr>`).join('')
+      + '</table>';
+
+    document.getElementById('states').innerHTML =
+      '<table><tr><th>实例</th><th>HTTP</th><th>获胜调查 ID</th><th>格数</th><th>分区</th></tr>'
+      + r.states.map(s => `<tr><td>${esc(s.target)}</td><td>${esc(s.status ?? '—')}</td><td><code>${esc(s.survey_id ?? s.error ?? '—')}</code></td><td>${esc(s.cell_count ?? '—')}</td><td>${esc((s.districts || []).join('、'))}</td></tr>`).join('')
+      + '</table>';
+
+    const db = r.db;
+    document.getElementById('db').innerHTML =
+      `<table><tr><th>调查 ID</th><th>格数</th><th>分区</th><th>年龄组</th><th>公开记录数</th><th>检出数合计</th></tr>`
+      + `<tr><td><code>${esc(db.survey_id ?? '—')}</code></td><td>${db.cell_count}</td><td>${esc(db.districts.join('、'))}</td><td>${esc(db.age_groups.join('、'))}</td><td>${db.publications}</td><td>${db.checksum}</td></tr></table>`;
+  }catch(e){
+    const d = e.body && e.body.detail;
+    show(el, 'err', typeof d === 'string' ? d : '演示请求失败：' + (e.status || e));
+  }finally{
+    btn.disabled = false;
+  }
+}
+init().catch(e => show(document.getElementById('msg'), 'err', '初始化失败：' + e));
+</script>
+</body>
+</html>

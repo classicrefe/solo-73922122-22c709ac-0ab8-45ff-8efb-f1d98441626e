@@ -69,8 +69,29 @@ def run():
         # ---- 2. 正常导入 + 不可更换 ----
         r = import_csv(SAMPLE)
         check("示例导入成功", r.status_code == 201 and r.json()["imported"] == 4, r.text)
+        survey_id = r.json().get("survey_id")
+        check("导入响应含获胜调查 ID", bool(survey_id), r.text)
         r = import_csv(SAMPLE)
         check("重复导入被拒绝（导入后不可更换）", r.status_code == 409, r.text)
+
+        # 另一份文件（不同分区）同样被拒绝，且不会混入库中
+        other = (
+            "分区,年龄组,人数,检出数\n"
+            "城南,青年,10,3\n城南,老年,10,7\n"
+        )
+        r = import_csv(other)
+        check("另一份不同调查也被拒绝", r.status_code == 409, r.text)
+        r = client.get("/api/admin/state")
+        j = r.json()
+        check(
+            "库中仍只有获胜文件的 4 格，未混入另一份",
+            [c["district"] for c in j["cells"]].count("城南") == 0
+            and len(j["cells"]) == 4
+            and j["survey_id"] == survey_id,
+            r.text,
+        )
+        r = client.post("/api/preview", json={"districts": ["城南"], "age_groups": ["青年"]})
+        check("预览不识别落败文件的分区", r.status_code == 400, r.text)
 
         # ---- 3. 预览 ----
         r = client.post("/api/preview", json={"districts": ["城东"], "age_groups": ["青年", "老年"]})
@@ -150,10 +171,10 @@ def run():
         before = len(client.get("/api/public").json()["publications"])
 
         # 9a. 接口层：插入时发生异常 → 500 且无记录产生
-        orig_insert = mainmod.insert_publication
+        orig_publish_checked = mainmod.publish_checked
         def _boom(*a, **k):
             raise RuntimeError("模拟保存失败")
-        mainmod.insert_publication = _boom
+        mainmod.publish_checked = _boom
         try:
             r = client.post(
                 "/api/publish",
@@ -161,15 +182,17 @@ def run():
             )
             check("保存时异常返回 500", r.status_code == 500, r.text)
         finally:
-            mainmod.insert_publication = orig_insert
+            mainmod.publish_checked = orig_publish_checked
         after = len(client.get("/api/public").json()["publications"])
         check("保存失败未留下半次发布", after == before, f"before={before} after={after}")
 
-        # 9b. 存储层：库不可打开时写入抛错，且库内容不变
+        # 9b. 存储层：库不可打开时发布事务抛错，且库内容不变
         orig_path = dbmod.DB_PATH
         dbmod.DB_PATH = _TMP  # 指向目录：SQLite 无法打开
         try:
-            dbmod.insert_publication(["x"], ["y"], 1)
+            dbmod.publish_checked(
+                ["x"], ["y"], 1, "token", 0, lambda cells, pubs: None
+            )
             check("库不可打开时写入抛错", False, "未抛错")
         except Exception:
             check("库不可打开时写入抛错", True)

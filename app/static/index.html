@@ -30,11 +30,12 @@
 <header>
   <h1>疾控汇总发布安全审查台（内部）</h1>
   <a href="/public" target="_blank">查看公开页 →</a>
+  <a href="/demo" target="_blank">并发导入演示 →</a>
 </header>
 <main>
   <section id="importSec">
     <h2>1. 导入调查数据</h2>
-    <p class="hint">CSV 表头：分区,年龄组,人数,检出数。至多 16 格；人数 ≥ 5；检出数为 0~人数的整数；（分区,年龄组）组合唯一。<b>导入后不可更换。</b></p>
+    <p class="hint">CSV 表头：分区,年龄组,人数,检出数。至多 16 格；人数 ≥ 5；检出数为 0~人数的整数；（分区,年龄组）组合唯一。<b>全局仅可导入一次，导入后不可更换；并发导入时只有一份能成功，另一方会收到“已导入”冲突。</b></p>
     <input type="file" id="file" accept=".csv">
     <button onclick="doImport()">导入 CSV</button>
     <button class="secondary" onclick="importSample()">导入示例数据</button>
@@ -43,6 +44,7 @@
 
   <section id="gridSec" class="hidden">
     <h2>2. 原始数据（仅内部可见，公开页不含格内检出数）</h2>
+    <p class="hint" id="surveyMeta"></p>
     <div id="grid"></div>
   </section>
 
@@ -103,6 +105,9 @@ function render(){
   for(const id of ['gridSec','selSec','pubSec'])
     document.getElementById(id).classList.toggle('hidden', !imported);
   if(!imported) return;
+
+  document.getElementById('surveyMeta').textContent =
+    `获胜调查 ID：${state.survey_id}（全局唯一固定调查，预览/发布/公开页均只读取此份）`;
 
   let h = '<table><tr><th>分区</th><th>年龄组</th><th>人数</th><th>检出数</th></tr>';
   for(const c of state.cells)
